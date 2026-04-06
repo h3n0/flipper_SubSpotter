@@ -1,12 +1,3 @@
-Build
-
-Use the local uFBT install already present in this repo:
-
-./.venv/bin/ufbt
-Launch to a connected Flipper:
-
-./.venv/bin/ufbt launch
-
 # SubSpotter
 
 SubSpotter turns Flipper Zero into a passive Sub-GHz explorer for weather sensors and other low-power ISM devices. It scans common bands, fingerprints bursts, and helps identify household sensors without transmitting.
