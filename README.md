@@ -2,76 +2,80 @@
 
 SubSpotter turns Flipper Zero into a passive Sub-GHz explorer for weather sensors and other low-power ISM devices. It scans common bands, fingerprints bursts, and helps identify household sensors without transmitting.
 
+It also integrates the Flipper SDK's built-in protocol decoder pipeline (SubGhzReceiver), so known protocols (Oregon, LaCrosse, Acurite, Nexus, TPMS, etc.) are decoded alongside raw burst fingerprinting.
+
 The app is intentionally framed as a receive-only signal analysis tool for your own lab, test, and benign environmental devices. It does not include transmit, replay, emulate, or bypass features.
 
-## MVP Features
+## Features
 
-- Band hopper across common receive frequencies: 433.92 MHz, 868.35 MHz, and 915.00 MHz.
-- Passive receive only using alternating OOK and FSK-style listening presets.
-- Burst fingerprinting based on packet length, pulse profile, repeat timing, and live RSSI.
+- **Focused scan** with manual band/preset switching via Up/Down on the LIVE screen.
+- Six scan entries across three bands: 433.92 MHz, 868.35 MHz, 915.00 MHz, each with OOK and 2FSK presets.
+- **Passive receive only** — never transmits.
+- **Burst fingerprinting** based on packet length, pulse profile (short/medium/long distribution), repeat timing, and live RSSI.
+- **SDK protocol decoding** via the Flipper's SubGhzReceiver — recognises known protocols in real time.
 - Local matcher for likely device families:
-	- outdoor thermometers
-	- weather stations
-	- door/window sensors in a test setup
-	- TPMS lab or demo traces
-	- simple ISM beacons
+  - outdoor thermometers
+  - weather stations
+  - door/window sensors
+  - TPMS lab/demo traces
+  - simple ISM beacons
 - Three on-device screens:
-	- Live Scan
-	- Seen Devices
-	- Saved Captures
+  - **LIVE** — real-time scanning, RSSI, burst/SDK hit counters
+  - **SEEN** — fingerprinted devices list with confidence scores
+  - **SAVED** — captured entries with timestamps
 - Capture saving with user-selectable labels.
 - Session log append to a CSV file on-device.
 
 ## What The App Shows
 
-For each likely burst or recurring device family, SubSpotter surfaces:
+For each detected burst or recurring device, SubSpotter surfaces:
 
-- frequency
-- RSSI / signal strength
+- frequency and preset (OOK / 2FSK)
+- RSSI / signal strength with visual meter
 - modulation guess
 - repeat interval
-- packet length
-- pulse profile summary
+- packet length (pulse count)
+- pulse profile summary (Short / Medium / Long)
 - confidence score
-
-The current implementation focuses on useful fingerprinting rather than full protocol decoding.
+- SDK-decoded protocol name (when recognised)
+- total burst count and SDK decode hit count
 
 ## UI Flow
 
-### Live Scan
+### LIVE
 
-Shows the active band/preset, current RSSI, the last classified burst, and a simple three-band activity view.
-
-Controls:
-
-- Left: Seen Devices
-- Right: Saved Captures
-- OK: save the latest capture
-- Up/Down: cycle the label used for the next saved capture
-- Back: exit
-
-### Seen Devices
-
-Shows the most recent unique fingerprints grouped by rough similarity.
+Shows the active frequency/preset, current RSSI with signal meter, burst and SDK hit counters, and the latest status or decoded protocol name.
 
 Controls:
 
-- Left: Live Scan
-- Right: Saved Captures
-- Up/Down: move selection
-- OK: save the latest capture using the active label
-- Back: exit
+- **Up/Down**: switch between scan entries (bands and presets)
+- **Left**: go to SEEN
+- **Right**: go to SAVED
+- **OK**: save the latest capture
+- **Back**: exit
 
-### Saved Captures
+### SEEN
+
+Shows the most recent unique fingerprints grouped by rough similarity, with pulse profile, hit count, and repeat interval details.
+
+Controls:
+
+- **Up/Down**: move selection
+- **Left**: go to LIVE
+- **Right**: go to SAVED
+- **OK**: save the latest capture using the active label
+- **Back**: exit
+
+### SAVED
 
 Shows the in-memory saved capture list for the current run. Every save is also appended to the CSV log on-device.
 
 Controls:
 
-- Left: Seen Devices
-- Right: Live Scan
-- Up/Down: move selection
-- Back: exit
+- **Up/Down**: move selection
+- **Left**: go to SEEN
+- **Right**: go to LIVE
+- **Back**: exit
 
 ## Capture Storage
 
@@ -94,19 +98,25 @@ Each row currently includes:
 - confidence score
 - selected label
 
-## Fingerprinting Approach
+## Detection Approach
 
-SubSpotter does not try to ship a full decoder stack onto the Flipper.
+SubSpotter uses two complementary detection methods:
 
-Instead it classifies bursts using:
+### SDK Protocol Decoding
 
-- listening preset used during capture
+Raw IQ-level pulse/duration pairs are fed into the Flipper SDK's `SubGhzReceiver` with the full `subghz_protocol_registry`. This decodes known protocols (Oregon Scientific, LaCrosse, Acurite, Nexus, TPMS, etc.) in real time alongside the raw burst engine.
+
+### Burst Fingerprinting
+
+For signals not matched by a known protocol, SubSpotter classifies bursts using:
+
+- listening preset used during capture (OOK vs 2FSK)
 - pulse count per burst
 - short / medium / long pulse distribution
 - repeat interval when the same rough fingerprint is seen again
-- current peak RSSI
+- peak RSSI
 
-That keeps the app lightweight and understandable while still giving users a practical answer to “what am I seeing?”
+This dual approach gives useful results for both known and unknown protocols.
 
 ## Safety Boundary
 
@@ -144,17 +154,30 @@ Launch to a connected Flipper:
 - `subspotter.c` contains the current MVP implementation.
 - `README.md` documents the app behavior, boundaries, and usage.
 
+## Scan Entries
+
+| # | Frequency   | Preset | Dwell (ms) |
+|---|-------------|--------|------------|
+| 0 | 433.92 MHz  | OOK    | 5500       |
+| 1 | 868.35 MHz  | OOK    | 4500       |
+| 2 | 915.00 MHz  | OOK    | 4500       |
+| 3 | 433.92 MHz  | 2FSK   | 1800       |
+| 4 | 868.35 MHz  | 2FSK   | 1800       |
+| 5 | 915.00 MHz  | 2FSK   | 1800       |
+
+Use Up/Down on the LIVE screen to switch between entries.
+
 ## Current Limitations
 
-- Matching is heuristic, not a full decoder.
-- The saved capture list is in-memory for the current run, while the durable log is written to CSV.
-- Labels are selected from a small on-device preset list rather than free-text entry.
-- The current UI prioritizes fast scanning and review over deep waveform inspection.
+- Burst fingerprint matching is heuristic — confidence scores indicate match quality.
+- The saved capture list is in-memory for the current run; the durable log is appended to CSV.
+- Labels are selected from a preset list (Field Note, Greenhouse, Window Rig, Beacon Demo, TPMS Lab, Custom Tag).
+- Single-band focused scan — no automatic hopping between entries.
 
 ## Roadmap Ideas
 
-- richer pulse histogram and timing detail view
-- beginner-friendly “what am I seeing?” helper copy per family
+- Automatic frequency hopping across scan entries
+- Richer pulse histogram and timing detail view
+- Beginner-friendly "what am I seeing?" helper text per family
 - JSON export alongside CSV
-- desktop companion script for comparing captures against a larger signature database
-- optional compatibility mapping to rtl_433-style family labels without copying its decoder stack
+- Desktop companion script for comparing captures against a larger signature database
