@@ -1,0 +1,12 @@
+App(
+    appid="subspotter",
+    name="SubSpotter",
+    apptype=FlipperAppType.EXTERNAL,
+    entry_point="subspotter_app",
+    stack_size=4 * 1024,
+    requires=["gui", "storage"],
+    fap_category="Tools",
+    fap_description="Passive Sub-GHz scanner for weather sensors and ISM devices",
+    fap_author="GitHub Copilot",
+    fap_version="0.1",
+)
