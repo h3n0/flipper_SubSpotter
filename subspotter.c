@@ -14,9 +14,8 @@
 #define SUBSPOTTER_SCAN_ENTRY_COUNT 6
 #define SUBSPOTTER_MAX_SEEN_DEVICES 12
 #define SUBSPOTTER_MAX_SAVED_CAPTURES 24
-#define SUBSPOTTER_MIN_PACKET_PULSES 16
-#define SUBSPOTTER_PACKET_GAP_US 5000U
-#define SUBSPOTTER_HOP_INTERVAL_MS 1200U
+#define SUBSPOTTER_MIN_PACKET_PULSES 8
+#define SUBSPOTTER_PACKET_GAP_US 12000U
 #define SUBSPOTTER_UI_TICK_MS 100U
 #define SUBSPOTTER_LABEL_COUNT 6
 #define SUBSPOTTER_SAVE_DIR APP_DATA_PATH("subspotter")
@@ -43,6 +42,7 @@ typedef struct {
     FuriHalSubGhzPreset preset;
     const char* preset_label;
     const char* modulation_label;
+    uint32_t dwell_ms;
 } SubSpotterScanEntry;
 
 typedef struct {
@@ -99,9 +99,11 @@ typedef struct {
     uint8_t selected_saved;
     uint8_t label_index;
     uint8_t current_scan_index;
-    uint32_t last_hop_ms;
+    uint32_t current_scan_started_ms;
+    uint32_t current_frequency_hz;
     float latest_rssi;
     uint16_t activity[3];
+    uint32_t total_bursts;
     SubSpotterBurstStats current_burst;
     SubSpotterSeenDevice seen_devices[SUBSPOTTER_MAX_SEEN_DEVICES];
     SubSpotterSavedCapture saved_captures[SUBSPOTTER_MAX_SAVED_CAPTURES];
@@ -127,12 +129,12 @@ typedef struct {
 } SubSpotterFingerprintRule;
 
 static const SubSpotterScanEntry subspotter_scan_plan[SUBSPOTTER_SCAN_ENTRY_COUNT] = {
-    {433920000U, FuriHalSubGhzPresetOok650Async, "OOK", "OOK"},
-    {433920000U, FuriHalSubGhzPreset2FSKDev476Async, "2FSK", "FSK-ish"},
-    {868350000U, FuriHalSubGhzPresetOok650Async, "OOK", "OOK"},
-    {868350000U, FuriHalSubGhzPreset2FSKDev476Async, "2FSK", "FSK-ish"},
-    {915000000U, FuriHalSubGhzPresetOok650Async, "OOK", "OOK"},
-    {915000000U, FuriHalSubGhzPreset2FSKDev476Async, "2FSK", "FSK-ish"},
+    {433920000U, FuriHalSubGhzPresetOok650Async, "OOK", "OOK", 5500U},
+    {868350000U, FuriHalSubGhzPresetOok650Async, "OOK", "OOK", 4500U},
+    {915000000U, FuriHalSubGhzPresetOok650Async, "OOK", "OOK", 4500U},
+    {433920000U, FuriHalSubGhzPreset2FSKDev476Async, "2FSK", "FSK-ish", 1800U},
+    {868350000U, FuriHalSubGhzPreset2FSKDev476Async, "2FSK", "FSK-ish", 1800U},
+    {915000000U, FuriHalSubGhzPreset2FSKDev476Async, "2FSK", "FSK-ish", 1800U},
 };
 
 static const char* subspotter_label_options[SUBSPOTTER_LABEL_COUNT] = {
@@ -558,7 +560,7 @@ static void subspotter_finalize_burst(SubSpotterApp* app) {
     }
 
     int32_t existing_index =
-        subspotter_find_seen_device(app, entry->frequency_hz, entry->modulation_label, burst.pulse_count);
+        subspotter_find_seen_device(app, app->current_frequency_hz, entry->modulation_label, burst.pulse_count);
     uint32_t repeat_ms = 0;
 
     if(existing_index >= 0) {
@@ -568,6 +570,10 @@ static void subspotter_finalize_burst(SubSpotterApp* app) {
     SubSpotterFamily family = SubSpotterFamilyUnknown;
     uint8_t confidence =
         subspotter_match_family(&burst, subspotter_scan_entry_is_ook(entry), repeat_ms, &family);
+
+    if((family == SubSpotterFamilyUnknown) && (burst.pulse_count >= 12U)) {
+        confidence = (confidence < 30U) ? 30U : confidence;
+    }
 
     if(existing_index < 0) {
         existing_index = subspotter_allocate_seen_device(app);
@@ -584,7 +590,7 @@ static void subspotter_finalize_burst(SubSpotterApp* app) {
         burst.short_count,
         burst.medium_count,
         burst.long_count);
-    device->frequency_hz = entry->frequency_hz;
+    device->frequency_hz = app->current_frequency_hz;
     device->repeat_ms = repeat_ms;
     device->peak_rssi = burst.peak_rssi;
     device->packet_length = burst.pulse_count;
@@ -592,16 +598,22 @@ static void subspotter_finalize_burst(SubSpotterApp* app) {
     device->hits++;
     device->last_seen_ms = now_ms;
 
-    app->activity[subspotter_get_band_index(entry->frequency_hz)]++;
+    app->activity[subspotter_get_band_index(app->current_frequency_hz)]++;
+    app->total_bursts++;
     app->last_family = family;
     strncpy(app->last_modulation, entry->modulation_label, sizeof(app->last_modulation) - 1U);
     strncpy(app->last_profile, device->profile, sizeof(app->last_profile) - 1U);
-    app->last_frequency_hz = entry->frequency_hz;
+    app->last_frequency_hz = app->current_frequency_hz;
     app->last_repeat_ms = repeat_ms;
     app->last_peak_rssi = burst.peak_rssi;
     app->last_packet_length = burst.pulse_count;
     app->last_confidence = confidence;
-    snprintf(app->status_line, sizeof(app->status_line), "Latest: %s", subspotter_family_name(family));
+    snprintf(
+        app->status_line,
+        sizeof(app->status_line),
+        "%s %s",
+        (family == SubSpotterFamilyUnknown) ? "Burst" : "Seen",
+        subspotter_family_short_name(family));
 
     subspotter_reset_burst(&app->current_burst);
 }
@@ -673,11 +685,13 @@ static bool subspotter_apply_scan_entry(SubSpotterApp* app, uint8_t scan_index) 
     app->current_scan_index = scan_index % SUBSPOTTER_SCAN_ENTRY_COUNT;
     const SubSpotterScanEntry* entry = &subspotter_scan_plan[app->current_scan_index];
 
+    subghz_devices_reset(app->radio_device);
     subghz_devices_load_preset(app->radio_device, entry->preset, NULL);
-    subghz_devices_set_frequency(app->radio_device, entry->frequency_hz);
+    app->current_frequency_hz = subghz_devices_set_frequency(app->radio_device, entry->frequency_hz);
     subghz_devices_flush_rx(app->radio_device);
     subghz_devices_set_rx(app->radio_device);
     subghz_devices_start_async_rx(app->radio_device, subspotter_capture_callback, app);
+    app->current_scan_started_ms = furi_get_tick();
 
     return true;
 }
@@ -770,12 +784,15 @@ static void subspotter_draw_live_scan(Canvas* canvas, SubSpotterApp* app) {
 
     subspotter_draw_tabs(canvas, app->current_screen);
     canvas_set_font(canvas, FontSecondary);
-    subspotter_format_frequency_short(frequency, sizeof(frequency), entry->frequency_hz);
+    subspotter_format_frequency_short(
+        frequency,
+        sizeof(frequency),
+        app->current_frequency_hz ? app->current_frequency_hz : entry->frequency_hz);
     snprintf(line, sizeof(line), "%s %s", frequency, entry->preset_label);
     canvas_draw_str(canvas, 4, 20, line);
     snprintf(line, sizeof(line), "Burst %s", subspotter_family_short_name(app->last_family));
     canvas_draw_str(canvas, 4, 28, line);
-    snprintf(line, sizeof(line), "Len %u Rep %lu", app->last_packet_length, app->last_repeat_ms);
+    snprintf(line, sizeof(line), "Len %u B%lu", app->last_packet_length, app->total_bursts);
     canvas_draw_str(canvas, 64, 20, line);
     snprintf(line, sizeof(line), "%s %u%%", app->last_modulation[0] ? app->last_modulation : "--", app->last_confidence);
     canvas_draw_str(canvas, 64, 28, line);
@@ -1002,8 +1019,8 @@ static void subspotter_tick(SubSpotterApp* app) {
             subspotter_finalize_burst(app);
         }
 
-        if((now_ms - app->last_hop_ms) >= SUBSPOTTER_HOP_INTERVAL_MS) {
-            app->last_hop_ms = now_ms;
+          if((now_ms - app->current_scan_started_ms) >=
+              subspotter_scan_plan[app->current_scan_index].dwell_ms) {
             subspotter_apply_scan_entry(app, (uint8_t)(app->current_scan_index + 1U));
         }
     }
@@ -1031,8 +1048,6 @@ int32_t subspotter_app(void* p) {
     gui_add_view_port(app->gui, app->view_port, GuiLayerFullscreen);
 
     subspotter_init_radio(app);
-    app->last_hop_ms = furi_get_tick();
-
     while(app->running) {
         InputEvent input_event;
 
