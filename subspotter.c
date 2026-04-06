@@ -327,13 +327,13 @@ static void subspotter_draw_tabs(Canvas* canvas, SubSpotterScreen current_screen
     for(size_t i = 0; i < SubSpotterScreenCount; i++) {
         const int32_t x = 2 + (int32_t)(i * 42U);
         if(i == current_screen) {
-            canvas_draw_box(canvas, x, 1, 40, 11);
+            canvas_draw_box(canvas, x, 0, 40, 8);
             canvas_set_color(canvas, ColorWhite);
-            canvas_draw_str(canvas, x + 9, 9, tabs[i]);
+            canvas_draw_str(canvas, x + 9, 7, tabs[i]);
             canvas_set_color(canvas, ColorBlack);
         } else {
-            canvas_draw_frame(canvas, x, 1, 40, 11);
-            canvas_draw_str(canvas, x + 9, 9, tabs[i]);
+            canvas_draw_frame(canvas, x, 0, 40, 8);
+            canvas_draw_str(canvas, x + 9, 7, tabs[i]);
         }
     }
 }
@@ -903,16 +903,16 @@ static void subspotter_draw_live_scan(Canvas* canvas, SubSpotterApp* app) {
         app->current_frequency_hz ? app->current_frequency_hz : entry->frequency_hz);
     snprintf(line, sizeof(line), "%s %s", frequency, entry->preset_label);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 4, 24, line);
+    canvas_draw_str(canvas, 4, 20, line);
     /* Scan position indicator */
     canvas_set_font(canvas, FontSecondary);
     snprintf(line, sizeof(line), "%u/%u", app->current_scan_index + 1U, SUBSPOTTER_SCAN_ENTRY_COUNT);
-    canvas_draw_str(canvas, 104, 24, line);
+    canvas_draw_str(canvas, 104, 20, line);
 
     /* --- Row 2: Wide RSSI bar + dBm value --- */
     {
         const int32_t bar_x = 4;
-        const int32_t bar_y = 27;
+        const int32_t bar_y = 23;
         const uint8_t bar_w = 72;
         const uint8_t bar_h = 7;
         const uint8_t fill = (uint8_t)((rssi_pct * bar_w) / 100);
@@ -926,15 +926,15 @@ static void subspotter_draw_live_scan(Canvas* canvas, SubSpotterApp* app) {
 
     /* --- Row 3: Burst + SDK counters --- */
     snprintf(line, sizeof(line), "Bursts %lu  SDK %u", app->total_bursts, app->decoded_hits);
-    canvas_draw_str(canvas, 4, 43, line);
+    canvas_draw_str(canvas, 4, 39, line);
 
     /* --- Row 4: Status / decoded label --- */
     if(app->decoded_label[0]) {
         canvas_set_font(canvas, FontPrimary);
-        canvas_draw_str(canvas, 4, 53, app->decoded_label);
+        canvas_draw_str(canvas, 4, 49, app->decoded_label);
         canvas_set_font(canvas, FontSecondary);
     } else {
-        canvas_draw_str(canvas, 4, 53, app->status_line);
+        canvas_draw_str(canvas, 4, 49, app->status_line);
     }
 
     /* --- Bottom buttons --- */
@@ -952,8 +952,8 @@ static void subspotter_draw_seen_devices(Canvas* canvas, SubSpotterApp* app) {
     canvas_set_font(canvas, FontSecondary);
 
     if(used_count == 0U) {
-        canvas_draw_str(canvas, 14, 28, "No fingerprints yet.");
-        canvas_draw_str(canvas, 14, 38, "Leave LIVE open to scan.");
+        canvas_draw_str(canvas, 14, 24, "No fingerprints yet.");
+        canvas_draw_str(canvas, 14, 34, "Leave LIVE open to scan.");
     } else {
         /* List: up to 3 rows */
         for(size_t row = 0; row < 3U; row++) {
@@ -963,7 +963,7 @@ static void subspotter_draw_seen_devices(Canvas* canvas, SubSpotterApp* app) {
             }
 
             const SubSpotterSeenDevice* device = &app->seen_devices[index];
-            const int32_t y = 21 + (int32_t)(row * 10U);
+            const int32_t y = 17 + (int32_t)(row * 10U);
             char left[20];
             char right[16];
             char freq_buf[8];
@@ -989,7 +989,7 @@ static void subspotter_draw_seen_devices(Canvas* canvas, SubSpotterApp* app) {
         if(app->seen_devices[app->selected_seen].used) {
             const SubSpotterSeenDevice* selected = &app->seen_devices[app->selected_seen];
             char detail[40];
-            canvas_draw_line(canvas, 2, 51, 126, 51);
+            canvas_draw_line(canvas, 2, 40, 126, 40);
             snprintf(
                 detail,
                 sizeof(detail),
@@ -998,11 +998,11 @@ static void subspotter_draw_seen_devices(Canvas* canvas, SubSpotterApp* app) {
                 selected->hits,
                 selected->packet_length,
                 selected->repeat_ms);
-            canvas_draw_str(canvas, 4, 60, detail);
+            canvas_draw_str(canvas, 4, 49, detail);
         }
 
         if(used_count > 3U) {
-            elements_scrollbar_pos(canvas, 126, 14, 37, selected_position, used_count);
+            elements_scrollbar_pos(canvas, 126, 10, 37, selected_position, used_count);
         }
     }
 
@@ -1020,8 +1020,8 @@ static void subspotter_draw_saved_captures(Canvas* canvas, SubSpotterApp* app) {
     canvas_set_font(canvas, FontSecondary);
 
     if(used_count == 0U) {
-        canvas_draw_str(canvas, 14, 28, "No saved captures yet.");
-        canvas_draw_str(canvas, 14, 38, "Press OK to save.");
+        canvas_draw_str(canvas, 14, 24, "No saved captures yet.");
+        canvas_draw_str(canvas, 14, 34, "Press OK to save.");
     } else {
         /* List: up to 3 rows */
         for(size_t row = 0; row < 3U; row++) {
@@ -1031,7 +1031,7 @@ static void subspotter_draw_saved_captures(Canvas* canvas, SubSpotterApp* app) {
             }
 
             const SubSpotterSavedCapture* capture = &app->saved_captures[index];
-            const int32_t y = 21 + (int32_t)(row * 10U);
+            const int32_t y = 17 + (int32_t)(row * 10U);
             char left[20];
             char right[16];
 
@@ -1061,7 +1061,7 @@ static void subspotter_draw_saved_captures(Canvas* canvas, SubSpotterApp* app) {
             char detail[40];
             char freq_buf[8];
             subspotter_format_frequency_short(freq_buf, sizeof(freq_buf), selected->frequency_hz);
-            canvas_draw_line(canvas, 2, 51, 126, 51);
+            canvas_draw_line(canvas, 2, 47, 126, 47);
             snprintf(
                 detail,
                 sizeof(detail),
@@ -1070,11 +1070,11 @@ static void subspotter_draw_saved_captures(Canvas* canvas, SubSpotterApp* app) {
                 freq_buf,
                 selected->modulation,
                 selected->profile);
-            canvas_draw_str(canvas, 4, 60, detail);
+            canvas_draw_str(canvas, 4, 56, detail);
         }
 
         if(used_count > 3U) {
-            elements_scrollbar_pos(canvas, 126, 14, 37, selected_position, used_count);
+            elements_scrollbar_pos(canvas, 126, 10, 37, selected_position, used_count);
         }
     }
 
