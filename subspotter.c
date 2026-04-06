@@ -6,6 +6,9 @@
 #include <input/input.h>
 #include <lib/subghz/devices/cc1101_int/cc1101_int_interconnect.h>
 #include <lib/subghz/devices/devices.h>
+#include <lib/subghz/environment.h>
+#include <lib/subghz/receiver.h>
+#include <lib/subghz/subghz_protocol_registry.h>
 #include <storage/storage.h>
 
 #include <stdio.h>
@@ -14,8 +17,8 @@
 #define SUBSPOTTER_SCAN_ENTRY_COUNT 6
 #define SUBSPOTTER_MAX_SEEN_DEVICES 12
 #define SUBSPOTTER_MAX_SAVED_CAPTURES 24
-#define SUBSPOTTER_MIN_PACKET_PULSES 8
-#define SUBSPOTTER_PACKET_GAP_US 12000U
+#define SUBSPOTTER_MIN_PACKET_PULSES 4
+#define SUBSPOTTER_PACKET_GAP_US 20000U
 #define SUBSPOTTER_UI_TICK_MS 100U
 #define SUBSPOTTER_LABEL_COUNT 6
 #define SUBSPOTTER_SAVE_DIR APP_DATA_PATH("subspotter")
@@ -92,8 +95,13 @@ typedef struct {
     Gui* gui;
     Storage* storage;
     const SubGhzDevice* radio_device;
+    SubGhzEnvironment* subghz_environment;
+    SubGhzReceiver* subghz_receiver;
+    FuriString* decoded_string;
     bool running;
     bool radio_ready;
+    bool decoder_ready;
+    bool rx_active;
     SubSpotterScreen current_screen;
     uint8_t selected_seen;
     uint8_t selected_saved;
@@ -103,6 +111,7 @@ typedef struct {
     uint32_t current_frequency_hz;
     float latest_rssi;
     uint16_t activity[3];
+    uint16_t decoded_hits;
     uint32_t total_bursts;
     SubSpotterBurstStats current_burst;
     SubSpotterSeenDevice seen_devices[SUBSPOTTER_MAX_SEEN_DEVICES];
@@ -116,6 +125,7 @@ typedef struct {
     uint16_t last_packet_length;
     uint8_t last_confidence;
     char status_line[28];
+    char decoded_label[28];
 } SubSpotterApp;
 
 typedef struct {
@@ -153,6 +163,8 @@ static const SubSpotterFingerprintRule subspotter_rules[] = {
     {SubSpotterFamilyTpmsDemo, 0, 120, 520, 4000, 120000, 1},
     {SubSpotterFamilyIsmBeacon, -1, 12, 90, 150, 5000, 2},
 };
+
+static void subspotter_direct_capture_callback(bool level, uint32_t duration, void* context);
 
 static const char* subspotter_family_name(SubSpotterFamily family) {
     switch(family) {
@@ -549,6 +561,116 @@ fill_slot:
     subspotter_append_capture_log(app, capture);
 }
 
+static SubSpotterFamily subspotter_family_from_decoded_label(const char* decoded_label) {
+    if(strstr(decoded_label, "TPMS") != NULL) {
+        return SubSpotterFamilyTpmsDemo;
+    } else if(
+        (strstr(decoded_label, "Oregon") != NULL) || (strstr(decoded_label, "LaCrosse") != NULL) ||
+        (strstr(decoded_label, "Acurite") != NULL) || (strstr(decoded_label, "Bresser") != NULL)) {
+        return SubSpotterFamilyWeatherStation;
+    } else if(
+        (strstr(decoded_label, "Thermo") != NULL) || (strstr(decoded_label, "Nexus") != NULL) ||
+        (strstr(decoded_label, "TX") != NULL)) {
+        return SubSpotterFamilyOutdoorThermometer;
+    } else if(strstr(decoded_label, "Door") != NULL) {
+        return SubSpotterFamilyDoorWindowSensor;
+    }
+
+    return SubSpotterFamilyUnknown;
+}
+
+static void subspotter_receiver_callback(
+    SubGhzReceiver* receiver,
+    SubGhzProtocolDecoderBase* decoder_base,
+    void* context) {
+    UNUSED(receiver);
+    SubSpotterApp* app = context;
+
+    if(!app->decoded_string) {
+        return;
+    }
+
+    if(!subghz_protocol_decoder_base_get_string(decoder_base, app->decoded_string)) {
+        return;
+    }
+
+    const char* decoded = furi_string_get_cstr(app->decoded_string);
+    const char* newline = strchr(decoded, '\n');
+    size_t decoded_len = newline ? (size_t)(newline - decoded) : strlen(decoded);
+    if(decoded_len >= sizeof(app->decoded_label)) {
+        decoded_len = sizeof(app->decoded_label) - 1U;
+    }
+
+    memcpy(app->decoded_label, decoded, decoded_len);
+    app->decoded_label[decoded_len] = '\0';
+    app->decoded_hits++;
+
+    if(app->last_family == SubSpotterFamilyUnknown) {
+        app->last_family = subspotter_family_from_decoded_label(app->decoded_label);
+    }
+
+    snprintf(app->status_line, sizeof(app->status_line), "SDK %u", app->decoded_hits);
+}
+
+static void subspotter_pair_callback(void* context, bool level, uint32_t duration) {
+    SubSpotterApp* app = context;
+    SubSpotterBurstStats* burst = &app->current_burst;
+
+    if(duration == 0U) {
+        return;
+    }
+
+    if(app->decoder_ready && app->subghz_receiver) {
+        subghz_receiver_decode(app->subghz_receiver, level, duration);
+    }
+
+    if(burst->ready) {
+        return;
+    }
+
+    if(duration > SUBSPOTTER_PACKET_GAP_US) {
+        if(burst->pulse_count >= SUBSPOTTER_MIN_PACKET_PULSES) {
+            burst->ready = true;
+        } else {
+            subspotter_reset_burst(burst);
+        }
+        return;
+    }
+
+    if(!burst->active) {
+        burst->active = true;
+        burst->min_duration_us = duration;
+        burst->peak_rssi = app->latest_rssi;
+    }
+
+    burst->pulse_count++;
+    burst->total_duration_us += duration;
+
+    if(duration < burst->min_duration_us) {
+        burst->min_duration_us = duration;
+    }
+
+    if(duration > burst->max_duration_us) {
+        burst->max_duration_us = duration;
+    }
+
+    if(app->latest_rssi > burst->peak_rssi) {
+        burst->peak_rssi = app->latest_rssi;
+    }
+
+    if(duration < 450U) {
+        burst->short_count++;
+    } else if(duration < 1500U) {
+        burst->medium_count++;
+    } else {
+        burst->long_count++;
+    }
+}
+
+static void subspotter_direct_capture_callback(bool level, uint32_t duration, void* context) {
+    subspotter_pair_callback(context, level, duration);
+}
+
 static void subspotter_finalize_burst(SubSpotterApp* app) {
     const SubSpotterScanEntry* entry = &subspotter_scan_plan[app->current_scan_index];
     SubSpotterBurstStats burst = app->current_burst;
@@ -618,64 +740,15 @@ static void subspotter_finalize_burst(SubSpotterApp* app) {
     subspotter_reset_burst(&app->current_burst);
 }
 
-static void subspotter_capture_callback(bool level, uint32_t duration, void* context) {
-    UNUSED(level);
-    SubSpotterApp* app = context;
-    SubSpotterBurstStats* burst = &app->current_burst;
-
-    if(duration == 0U) {
-        return;
-    }
-
-    if(burst->ready) {
-        return;
-    }
-
-    if(duration > SUBSPOTTER_PACKET_GAP_US) {
-        if(burst->pulse_count >= SUBSPOTTER_MIN_PACKET_PULSES) {
-            burst->ready = true;
-        } else {
-            subspotter_reset_burst(burst);
-        }
-        return;
-    }
-
-    if(!burst->active) {
-        burst->active = true;
-        burst->min_duration_us = duration;
-        burst->peak_rssi = app->latest_rssi;
-    }
-
-    burst->pulse_count++;
-    burst->total_duration_us += duration;
-
-    if(duration < burst->min_duration_us) {
-        burst->min_duration_us = duration;
-    }
-
-    if(duration > burst->max_duration_us) {
-        burst->max_duration_us = duration;
-    }
-
-    if(app->latest_rssi > burst->peak_rssi) {
-        burst->peak_rssi = app->latest_rssi;
-    }
-
-    if(duration < 450U) {
-        burst->short_count++;
-    } else if(duration < 1500U) {
-        burst->medium_count++;
-    } else {
-        burst->long_count++;
-    }
-}
-
 static bool subspotter_apply_scan_entry(SubSpotterApp* app, uint8_t scan_index) {
     if(!app->radio_ready || !app->radio_device) {
         return false;
     }
 
-    subghz_devices_stop_async_rx(app->radio_device);
+    if(app->rx_active) {
+        subghz_devices_stop_async_rx(app->radio_device);
+        app->rx_active = false;
+    }
     subghz_devices_idle(app->radio_device);
 
     if(app->current_burst.active || app->current_burst.ready) {
@@ -685,30 +758,96 @@ static bool subspotter_apply_scan_entry(SubSpotterApp* app, uint8_t scan_index) 
     app->current_scan_index = scan_index % SUBSPOTTER_SCAN_ENTRY_COUNT;
     const SubSpotterScanEntry* entry = &subspotter_scan_plan[app->current_scan_index];
 
+    if(app->decoder_ready && app->subghz_receiver) {
+        subghz_receiver_reset(app->subghz_receiver);
+    }
+
     subghz_devices_reset(app->radio_device);
     subghz_devices_load_preset(app->radio_device, entry->preset, NULL);
     app->current_frequency_hz = subghz_devices_set_frequency(app->radio_device, entry->frequency_hz);
     subghz_devices_flush_rx(app->radio_device);
     subghz_devices_set_rx(app->radio_device);
-    subghz_devices_start_async_rx(app->radio_device, subspotter_capture_callback, app);
+    subghz_devices_start_async_rx(app->radio_device, subspotter_direct_capture_callback, app);
+    app->rx_active = true;
     app->current_scan_started_ms = furi_get_tick();
+    app->decoded_label[0] = '\0';
+    {
+        char frequency[12];
+        subspotter_format_frequency_short(frequency, sizeof(frequency), app->current_frequency_hz);
+        snprintf(app->status_line, sizeof(app->status_line), "Focus %s %s", frequency, entry->preset_label);
+    }
 
     return true;
 }
 
+static void subspotter_init_decoder(SubSpotterApp* app) {
+    app->decoded_string = furi_string_alloc();
+    app->subghz_environment = subghz_environment_alloc();
+    if(!app->subghz_environment) {
+        return;
+    }
+
+    subghz_environment_set_protocol_registry(app->subghz_environment, &subghz_protocol_registry);
+    app->subghz_receiver = subghz_receiver_alloc_init(app->subghz_environment);
+
+    if(!app->subghz_receiver) {
+        return;
+    }
+
+    subghz_receiver_set_filter(app->subghz_receiver, SubGhzProtocolFlag_Decodable);
+    subghz_receiver_set_rx_callback(app->subghz_receiver, subspotter_receiver_callback, app);
+
+    app->decoder_ready = true;
+}
+
+static void subspotter_release_radio_state(SubSpotterApp* app, bool release_device) {
+    if(release_device && app->radio_device) {
+        subghz_devices_deinit();
+    }
+
+    app->radio_device = NULL;
+    app->radio_ready = false;
+    app->current_frequency_hz = 0U;
+
+    if(app->subghz_receiver) {
+        subghz_receiver_free(app->subghz_receiver);
+        app->subghz_receiver = NULL;
+    }
+
+    if(app->subghz_environment) {
+        subghz_environment_free(app->subghz_environment);
+        app->subghz_environment = NULL;
+    }
+
+    if(app->decoded_string) {
+        furi_string_free(app->decoded_string);
+        app->decoded_string = NULL;
+    }
+
+    app->decoder_ready = false;
+}
+
 static bool subspotter_init_radio(SubSpotterApp* app) {
+    subspotter_release_radio_state(app, false);
     subghz_devices_init();
     app->radio_device = subghz_devices_get_by_name(SUBGHZ_DEVICE_CC1101_INT_NAME);
     if(!app->radio_device) {
-        strncpy(app->status_line, "Radio device not found", sizeof(app->status_line) - 1U);
+        strncpy(app->status_line, "Radio device missing", sizeof(app->status_line) - 1U);
+        subspotter_release_radio_state(app, true);
         return false;
     }
 
-    if(!subghz_devices_begin(app->radio_device)) {
-        strncpy(app->status_line, "Radio busy or unavailable", sizeof(app->status_line) - 1U);
+    if(!subghz_devices_is_connect(app->radio_device)) {
+        strncpy(app->status_line, "Radio not connected", sizeof(app->status_line) - 1U);
+        subspotter_release_radio_state(app, true);
         return false;
     }
 
+    /* begin() is NULL for the internal CC1101 and returns false — call it
+       but do not treat the return value as an error. */
+    subghz_devices_begin(app->radio_device);
+
+    subspotter_init_decoder(app);
     app->radio_ready = true;
     strncpy(app->status_line, "Passive scan running", sizeof(app->status_line) - 1U);
     return subspotter_apply_scan_entry(app, 0);
@@ -716,16 +855,18 @@ static bool subspotter_init_radio(SubSpotterApp* app) {
 
 static void subspotter_deinit_radio(SubSpotterApp* app) {
     if(!app->radio_ready || !app->radio_device) {
-        subghz_devices_deinit();
+        subspotter_release_radio_state(app, true);
         return;
     }
 
-    subghz_devices_stop_async_rx(app->radio_device);
+    if(app->rx_active) {
+        subghz_devices_stop_async_rx(app->radio_device);
+        app->rx_active = false;
+    }
     subghz_devices_idle(app->radio_device);
     subghz_devices_sleep(app->radio_device);
     subghz_devices_end(app->radio_device);
-    app->radio_ready = false;
-    subghz_devices_deinit();
+    subspotter_release_radio_state(app, true);
 }
 
 static void subspotter_save_latest(SubSpotterApp* app) {
@@ -745,27 +886,6 @@ static void subspotter_save_latest(SubSpotterApp* app) {
         app->last_packet_length,
         app->last_confidence);
     snprintf(app->status_line, sizeof(app->status_line), "Saved as %s", subspotter_label_options[app->label_index]);
-}
-
-static void subspotter_draw_activity_bars(Canvas* canvas, SubSpotterApp* app) {
-    uint16_t peak = 1;
-    for(size_t i = 0; i < 3; i++) {
-        if(app->activity[i] > peak) {
-            peak = app->activity[i];
-        }
-    }
-
-    for(size_t i = 0; i < 3; i++) {
-        const uint8_t bar_width = (uint8_t)((app->activity[i] * 26U) / peak);
-        const int32_t y = 35 + (int32_t)(i * 6U);
-        const char* label = (i == 0U) ? "433" : ((i == 1U) ? "868" : "915");
-
-        canvas_draw_str(canvas, 4, y, label);
-        canvas_draw_frame(canvas, 28, y - 5, 28, 5);
-        if(bar_width > 0U) {
-            canvas_draw_box(canvas, 29, y - 4, bar_width, 3);
-        }
-    }
 }
 
 static void subspotter_draw_live_scan(Canvas* canvas, SubSpotterApp* app) {
@@ -790,16 +910,12 @@ static void subspotter_draw_live_scan(Canvas* canvas, SubSpotterApp* app) {
         app->current_frequency_hz ? app->current_frequency_hz : entry->frequency_hz);
     snprintf(line, sizeof(line), "%s %s", frequency, entry->preset_label);
     canvas_draw_str(canvas, 4, 20, line);
-    snprintf(line, sizeof(line), "Burst %s", subspotter_family_short_name(app->last_family));
+    snprintf(line, sizeof(line), "RSSI %.1f dBm", (double)app->latest_rssi);
     canvas_draw_str(canvas, 4, 28, line);
-    snprintf(line, sizeof(line), "Len %u B%lu", app->last_packet_length, app->total_bursts);
-    canvas_draw_str(canvas, 64, 20, line);
-    snprintf(line, sizeof(line), "%s %u%%", app->last_modulation[0] ? app->last_modulation : "--", app->last_confidence);
-    canvas_draw_str(canvas, 64, 28, line);
-
-    subspotter_draw_activity_bars(canvas, app);
-    subspotter_draw_compact_meter(canvas, 64, 38, rssi_pct, "RSSI");
-    canvas_draw_str(canvas, 64, 46, app->last_profile[0] ? app->last_profile : "S0 M0 L0");
+    snprintf(line, sizeof(line), "Bursts %lu  SDK %u", app->total_bursts, app->decoded_hits);
+    canvas_draw_str(canvas, 4, 36, line);
+    canvas_draw_str(canvas, 4, 44, app->decoded_label[0] ? app->decoded_label : app->status_line);
+    subspotter_draw_compact_meter(canvas, 80, 20, rssi_pct, "Sig");
     elements_button_left(canvas, "Seen");
     elements_button_center(canvas, "Save");
     elements_button_right(canvas, "Saved");
@@ -987,8 +1103,7 @@ static void subspotter_handle_press(SubSpotterApp* app, InputKey key) {
         break;
     case InputKeyUp:
         if(app->current_screen == SubSpotterScreenLiveScan) {
-            app->label_index = (uint8_t)((app->label_index + 1U) % SUBSPOTTER_LABEL_COUNT);
-            snprintf(app->status_line, sizeof(app->status_line), "Label: %s", subspotter_label_options[app->label_index]);
+            subspotter_apply_scan_entry(app, (uint8_t)(app->current_scan_index + 1U));
         } else if(app->current_screen == SubSpotterScreenSeenDevices) {
             subspotter_select_next_used_seen(app, false);
         } else {
@@ -997,8 +1112,7 @@ static void subspotter_handle_press(SubSpotterApp* app, InputKey key) {
         break;
     case InputKeyDown:
         if(app->current_screen == SubSpotterScreenLiveScan) {
-            app->label_index = (uint8_t)((app->label_index + SUBSPOTTER_LABEL_COUNT - 1U) % SUBSPOTTER_LABEL_COUNT);
-            snprintf(app->status_line, sizeof(app->status_line), "Label: %s", subspotter_label_options[app->label_index]);
+            subspotter_apply_scan_entry(app, (uint8_t)(app->current_scan_index + SUBSPOTTER_SCAN_ENTRY_COUNT - 1U));
         } else if(app->current_screen == SubSpotterScreenSeenDevices) {
             subspotter_select_next_used_seen(app, true);
         } else {
@@ -1011,17 +1125,10 @@ static void subspotter_handle_press(SubSpotterApp* app, InputKey key) {
 }
 
 static void subspotter_tick(SubSpotterApp* app) {
-    uint32_t now_ms = furi_get_tick();
-
     if(app->radio_ready && app->radio_device) {
         app->latest_rssi = subghz_devices_get_rssi(app->radio_device);
         if(app->current_burst.ready) {
             subspotter_finalize_burst(app);
-        }
-
-          if((now_ms - app->current_scan_started_ms) >=
-              subspotter_scan_plan[app->current_scan_index].dwell_ms) {
-            subspotter_apply_scan_entry(app, (uint8_t)(app->current_scan_index + 1U));
         }
     }
 
