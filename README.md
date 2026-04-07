@@ -19,10 +19,11 @@ The app is intentionally framed as a receive-only signal analysis tool for your 
   - door/window sensors
   - TPMS lab/demo traces
   - simple ISM beacons
+- Compact tab bar for quick screen switching.
 - Three on-device screens:
-  - **LIVE** — real-time scanning, RSSI, burst/SDK hit counters
-  - **SEEN** — fingerprinted devices list with confidence scores
-  - **SAVED** — captured entries with timestamps
+  - **LIVE** — frequency/preset in bold, wide RSSI bar with dBm, burst/SDK counters, decoded label
+  - **SEEN** — scrollable fingerprint list with family, frequency, modulation, and detail panel
+  - **SAVED** — capture list with labels, family names, and timestamp/frequency detail
 - Capture saving with user-selectable labels.
 - Session log append to a CSV file on-device.
 
@@ -42,9 +43,14 @@ For each detected burst or recurring device, SubSpotter surfaces:
 
 ## UI Flow
 
+A compact 8px tab bar at the top shows LIVE / SEEN / SAVED. Left/Right arrows cycle between screens.
+
 ### LIVE
 
-Shows the active frequency/preset, current RSSI with signal meter, burst and SDK hit counters, and the latest status or decoded protocol name.
+Row 1: frequency and preset in bold, scan position (e.g. 2/6).  
+Row 2: wide RSSI bar with dBm value.  
+Row 3: burst count and SDK decode hit count.  
+Row 4: latest decoded protocol name (bold) or status message.
 
 Controls:
 
@@ -56,7 +62,7 @@ Controls:
 
 ### SEEN
 
-Shows the most recent unique fingerprints grouped by rough similarity, with pulse profile, hit count, and repeat interval details.
+Scrollable list (3 visible rows) showing family short name, frequency, modulation, and confidence. A separator line and detail row below show pulse profile, hit count, packet length, and repeat interval for the selected device.
 
 Controls:
 
@@ -68,7 +74,7 @@ Controls:
 
 ### SAVED
 
-Shows the in-memory saved capture list for the current run. Every save is also appended to the CSV log on-device.
+Scrollable list (3 visible rows) showing label name, family short name, and confidence. Detail row shows timestamp, frequency, modulation, and pulse profile.
 
 Controls:
 
